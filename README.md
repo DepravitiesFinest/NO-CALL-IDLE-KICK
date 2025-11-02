@@ -1,6 +1,6 @@
 # PreventIdleTimer - Discord Call Timer Prevention Plugin
 
-                                                                                        Still works as of -11/02/2025
+    Still works as of -11/02/2025
 
 ## Description
 A lightweight BetterDiscord plugin that completely prevents Discord's 3-minute idle timer in voice calls. No more getting kicked when you stay in call alone!
