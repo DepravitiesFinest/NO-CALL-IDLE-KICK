@@ -1,279 +1,429 @@
 /**
  * @name PreventIdleTimer
- * @author Nyxthal
+ * @author Nyxthal - Hyper
  * @description Prevents the creation of Discord's call idle timer completely
- * @version 1.1.0
+ * @version 1.3.0
  */
-
 
 module.exports = class PreventIdleTimer {
     constructor() {
-        this.originalSetTimeout = window.setTimeout;
+        this.originalSetTimeout = null;
         this.prevented = 0;
         this.indicator = null;
-        this.patching = false;
+        this.voiceObserver = null;
         this.initialized = false;
-        
-        this.patchInfo = {
-            startFunctionPatched: false,
-            timeoutPatched: false
-        };
+        this._observerDebounce = null;
+        this._sessionStart = null;
     }
 
     start() {
         if (this.initialized) return;
         this.initialized = true;
-        
+        this._sessionStart = Date.now();
+
+        // Nuke any stale indicator from a dirty reload
+        document.querySelectorAll("[data-prevent-idle-indicator]").forEach(el => el.remove());
+
+        this.originalSetTimeout = window.setTimeout;
         this.patchSetTimeout();
-        
         this.setupVoiceDetection();
-        
         this.createIndicator();
-        
+
         console.log("[PreventIdleTimer] Plugin initialized");
-        BdApi.UI.showToast("Idle Timer Prevention Active", {type: "success"});
+        BdApi.UI.showToast("Idle Timer Prevention Active", { type: "success" });
     }
-    
+
     patchSetTimeout() {
-        window.setTimeout = (callback, delay, ...args) => {
-            if (delay === 180000) {
-                const callbackStr = callback.toString();
-                
-                if (callbackStr.includes('_ref') || callbackStr.includes('idle')) {
-                    const stack = new Error().stack || '';
-                    
-                    if (stack.includes('start') || 
-                        stack.includes('voice') || 
-                        stack.includes('dispatch_VOICE_STATE_UPDATES') ||
-                        stack.includes('RTC')) {
-                        
-                        this.prevented++;
-                        this.patchInfo.timeoutPatched = true;
-                        this.updateIndicator();
-                        
-                        console.log(`[PreventIdleTimer] Prevented idle timer creation #${this.prevented}`);
-                        console.log('Callback:', callbackStr);
-                        console.log('Stack:', stack);
-                        
-                        this.showIndicator();
-                        
-                        return -987654321;
+        const self = this;
+        window.setTimeout = function patchedSetTimeout(callback, delay, ...args) {
+            if (delay === 180000 && typeof callback === "function") {
+                try {
+                    const cbStr = callback.toString();
+                    const looksLikeIdleTimer =
+                        cbStr.includes("_ref") ||
+                        cbStr.includes("idle") ||
+                        cbStr.includes("disconnect") ||
+                        cbStr.includes("kick");
+
+                    if (looksLikeIdleTimer) {
+                        const stack = new Error().stack || "";
+                        const fromVoiceContext =
+                            stack.includes("start") ||
+                            stack.includes("voice") ||
+                            stack.includes("Voice") ||
+                            stack.includes("RTC") ||
+                            stack.includes("VOICE_STATE") ||
+                            stack.includes("call");
+
+                        if (fromVoiceContext) {
+                            self.prevented++;
+                            self.updateIndicator();
+                            self.showIndicator();
+                            console.log(`[PreventIdleTimer] Blocked idle timer #${self.prevented}`);
+                            return 0;
+                        }
                     }
+                } catch (e) {
+                    console.warn("[PreventIdleTimer] Patch error, falling through:", e);
                 }
             }
-            
-            return this.originalSetTimeout.call(window, callback, delay, ...args);
+            return self.originalSetTimeout.call(window, callback, delay, ...args);
         };
-        
-        console.log("[PreventIdleTimer] Successfully patched setTimeout");
+        console.log("[PreventIdleTimer] setTimeout patched");
     }
-    
+
     setupVoiceDetection() {
-        this.voiceObserver = new MutationObserver((mutations) => {
-            const inVoiceChannel = document.querySelector('[class*="voiceCallWrapper"]') !== null || 
-                                   document.querySelector('[class*="videoWrapper"]') !== null ||
-                                   document.querySelector('[class*="callContainer"]') !== null;
-            
-            if (inVoiceChannel) {
-                this.showIndicator();
-            } else {
-                this.hideIndicator();
-            }
+        const checkVoice = () => {
+            const inCall =
+                document.querySelector('[class*="voiceCallWrapper"]') !== null ||
+                document.querySelector('[class*="videoWrapper"]') !== null ||
+                document.querySelector('[class*="callContainer"]') !== null ||
+                document.querySelector('[class*="joinedVoiceChannel"]') !== null;
+            inCall ? this.showIndicator() : this.hideIndicator();
+        };
+
+        this.voiceObserver = new MutationObserver(() => {
+            if (this._observerDebounce) return;
+            this._observerDebounce = this.originalSetTimeout.call(window, () => {
+                this._observerDebounce = null;
+                checkVoice();
+            }, 500);
         });
-        
-        this.voiceObserver.observe(document.body, { 
-            childList: true, 
-            subtree: true 
-        });
+
+        this.voiceObserver.observe(document.body, { childList: true, subtree: true });
+        checkVoice();
     }
-    
+
     createIndicator() {
         this.indicator = document.createElement("div");
-        this.indicator.style.position = "fixed";
-        this.indicator.style.bottom = "10px";
-        this.indicator.style.right = "10px";
-        this.indicator.style.backgroundColor = "rgba(0, 255, 0, 0.7)";
-        this.indicator.style.color = "white";
-        this.indicator.style.padding = "5px 10px";
-        this.indicator.style.borderRadius = "5px";
-        this.indicator.style.fontSize = "12px";
-        this.indicator.style.fontWeight = "bold";
-        this.indicator.style.zIndex = "9999";
-        this.indicator.style.pointerEvents = "none";
-        this.indicator.style.display = "none";
-        this.indicator.textContent = "Idle Timer: Disabled (0)";
-        
+        this.indicator.setAttribute("data-prevent-idle-indicator", "1");
+        Object.assign(this.indicator.style, {
+            position: "fixed",
+            bottom: "10px",
+            right: "10px",
+            backgroundColor: "rgba(14,14,16,0.92)",
+            color: "#E63946",
+            padding: "5px 10px",
+            borderRadius: "4px",
+            fontSize: "11px",
+            fontFamily: "Consolas, monospace",
+            fontWeight: "bold",
+            zIndex: "9999",
+            pointerEvents: "none",
+            display: "none",
+            userSelect: "none",
+            letterSpacing: "0.5px",
+            border: "1px solid rgba(230, 57, 70, 0.35)",
+            boxShadow: "0 0 10px rgba(230, 57, 70, 0.2)",
+        });
+        this.updateIndicator();
         document.body.appendChild(this.indicator);
     }
-    
+
     showIndicator() {
-        if (this.indicator) {
-            this.indicator.style.display = "block";
-            this.updateIndicator();
-        }
+        if (this.indicator) this.indicator.style.display = "block";
     }
-    
+
     hideIndicator() {
-        if (this.indicator) {
-            this.indicator.style.display = "none";
-        }
+        if (this.indicator) this.indicator.style.display = "none";
     }
-    
+
     updateIndicator() {
-        if (this.indicator) {
-            this.indicator.textContent = `Idle Timer: Disabled (${this.prevented})`;
-            
-            if (this.prevented > 0) {
-                this.indicator.style.backgroundColor = "rgba(0, 255, 0, 0.7)";
-            } else {
-                this.indicator.style.backgroundColor = "rgba(255, 165, 0, 0.7)";
-            }
-        }
+        if (!this.indicator) return;
+        this.indicator.textContent = `[IDLE] BLOCKED ×${this.prevented}`;
     }
-    
+
     stop() {
         if (this.originalSetTimeout) {
             window.setTimeout = this.originalSetTimeout;
             this.originalSetTimeout = null;
         }
-        
+        if (this._observerDebounce) {
+            clearTimeout(this._observerDebounce);
+            this._observerDebounce = null;
+        }
         if (this.voiceObserver) {
             this.voiceObserver.disconnect();
             this.voiceObserver = null;
         }
-        
-        if (this.indicator && this.indicator.parentNode) {
+        if (this.indicator?.parentNode) {
             this.indicator.parentNode.removeChild(this.indicator);
             this.indicator = null;
         }
-        
         this.initialized = false;
+        this.prevented = 0;
         console.log("[PreventIdleTimer] Plugin disabled");
     }
-    
+
     getSettingsPanel() {
+        const sessionTime = this._sessionStart
+            ? Math.floor((Date.now() - this._sessionStart) / 60000)
+            : 0;
+
         const panel = document.createElement("div");
         panel.innerHTML = `
             <style>
-                .prevent-idle-settings {
-                    color: white;
-                    font-family: 'Whitney', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #36393f 0%, #2f3136 100%);
-                    border-radius: 12px;
-                    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-                    max-width: 500px;
+                @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=DM+Sans:wght@400;500;600&display=swap');
+
+                .nyx-idle-root {
+                    --red: #E63946;
+                    --red-dim: rgba(230, 57, 70, 0.12);
+                    --red-glow: rgba(230, 57, 70, 0.3);
+                    --bg: #0e0e10;
+                    --bg-2: #131315;
+                    --bg-3: #1a1a1d;
+                    --border: rgba(255,255,255,0.06);
+                    --border-red: rgba(230, 57, 70, 0.28);
+                    --text: #e2e2e8;
+                    --text-dim: #5a5a66;
+                    --mono: 'Share Tech Mono', 'Consolas', monospace;
+                    --sans: 'DM Sans', sans-serif;
+
+                    font-family: var(--sans);
+                    background: var(--bg);
+                    color: var(--text);
+                    padding: 22px;
+                    border-radius: 10px;
+                    max-width: 460px;
                     margin: 0 auto;
+                    box-sizing: border-box;
+                    border: 1px solid var(--border);
                 }
-                .prevent-idle-settings h3 {
-                    color: #fff;
-                    font-size: 24px;
-                    font-weight: 700;
-                    margin: 0 0 24px 0;
-                    text-align: center;
+
+                .nyx-idle-root * {
+                    box-sizing: border-box;
+                    margin: 0;
+                    padding: 0;
+                }
+
+                /* Header */
+                .nyx-header {
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                    margin-bottom: 20px;
+                    padding-bottom: 18px;
+                    border-bottom: 1px solid var(--border);
+                }
+
+                .nyx-logo {
+                    width: 34px;
+                    height: 34px;
+                    background: var(--red-dim);
+                    border: 1px solid var(--border-red);
+                    border-radius: 7px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex-shrink: 0;
+                    box-shadow: 0 0 12px var(--red-glow);
+                }
+
+                .nyx-logo svg {
+                    width: 16px;
+                    height: 16px;
+                    color: var(--red);
+                }
+
+                .nyx-title-block { flex: 1; }
+
+                .nyx-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: var(--text);
+                    letter-spacing: 0.2px;
+                    line-height: 1;
+                }
+
+                .nyx-subtitle {
+                    font-family: var(--mono);
+                    font-size: 10px;
+                    color: var(--text-dim);
+                    margin-top: 4px;
                     letter-spacing: 0.5px;
                 }
-                .prevent-idle-settings .status-container {
+
+                .nyx-badge {
+                    font-family: var(--mono);
+                    font-size: 10px;
+                    padding: 3px 8px;
+                    border-radius: 4px;
+                    letter-spacing: 0.8px;
+                }
+
+                .nyx-badge.active {
+                    background: var(--red-dim);
+                    color: var(--red);
+                    border: 1px solid var(--border-red);
+                }
+
+                .nyx-badge.inactive {
+                    background: rgba(255,255,255,0.03);
+                    color: var(--text-dim);
+                    border: 1px solid var(--border);
+                }
+
+                /* Stats */
+                .nyx-stats {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 8px;
+                    margin-bottom: 12px;
+                }
+
+                .nyx-stat {
+                    background: var(--bg-2);
+                    border: 1px solid var(--border);
+                    border-radius: 7px;
+                    padding: 13px 14px;
+                    position: relative;
+                    overflow: hidden;
+                }
+
+                .nyx-stat:first-child {
+                    border-top: 2px solid var(--red);
+                }
+
+                .nyx-stat-value {
+                    font-family: var(--mono);
+                    font-size: 20px;
+                    color: var(--red);
+                    line-height: 1;
+                    margin-bottom: 5px;
+                }
+
+                .nyx-stat-label {
+                    font-size: 11px;
+                    color: var(--text-dim);
+                }
+
+                /* Shared card */
+                .nyx-card {
+                    background: var(--bg-2);
+                    border: 1px solid var(--border);
+                    border-radius: 7px;
+                    padding: 13px 14px;
+                    margin-bottom: 10px;
+                }
+
+                .nyx-card-label {
+                    font-family: var(--mono);
+                    font-size: 9px;
+                    color: var(--text-dim);
+                    letter-spacing: 1.2px;
+                    text-transform: uppercase;
+                    margin-bottom: 10px;
+                }
+
+                /* Info */
+                .nyx-info p {
+                    font-size: 12px;
+                    color: #7a7a8a;
+                    line-height: 1.65;
+                }
+
+                .nyx-info p + p { margin-top: 7px; }
+
+                .nyx-tag {
+                    font-family: var(--mono);
+                    font-size: 11px;
+                    color: var(--red);
+                    background: var(--red-dim);
+                    padding: 1px 5px;
+                    border-radius: 3px;
+                }
+
+                /* Footer */
+                .nyx-footer {
                     display: flex;
                     align-items: center;
-                    justify-content: center;
-                    margin-bottom: 24px;
+                    justify-content: space-between;
+                    margin-top: 14px;
+                    padding-top: 14px;
+                    border-top: 1px solid var(--border);
                 }
-                .prevent-idle-settings .status-dot {
+
+                .nyx-version {
+                    font-family: var(--mono);
+                    font-size: 10px;
+                    color: var(--text-dim);
+                    letter-spacing: 0.5px;
+                }
+
+                .nyx-gh-link {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-family: var(--mono);
+                    font-size: 10px;
+                    color: var(--text-dim);
+                    text-decoration: none;
+                    letter-spacing: 0.5px;
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    border: 1px solid var(--border);
+                    background: var(--bg-3);
+                    transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+                }
+
+                .nyx-gh-link:hover {
+                    color: var(--red);
+                    border-color: var(--border-red);
+                    box-shadow: 0 0 8px var(--red-glow);
+                }
+
+                .nyx-gh-link svg {
                     width: 12px;
                     height: 12px;
-                    border-radius: 50%;
-                    margin-right: 8px;
-                    background-color: #43b581;
-                    box-shadow: 0 0 10px #43b581;
-                    animation: pulse 2s infinite;
-                }
-                .prevent-idle-settings .status-dot.inactive {
-                    background-color: #f04747;
-                    box-shadow: 0 0 10px #f04747;
-                }
-                @keyframes pulse {
-                    0% {
-                        box-shadow: 0 0 0 0 rgba(67, 181, 129, 0.7);
-                    }
-                    70% {
-                        box-shadow: 0 0 0 6px rgba(67, 181, 129, 0);
-                    }
-                    100% {
-                        box-shadow: 0 0 0 0 rgba(67, 181, 129, 0);
-                    }
-                }
-                .prevent-idle-settings .status-text {
-                    font-size: 16px;
-                    font-weight: 600;
-                }
-                .prevent-idle-settings .description {
-                    background-color: rgba(32, 34, 37, 0.6);
-                    backdrop-filter: blur(5px);
-                    padding: 16px;
-                    border-radius: 8px;
-                    margin: 0 0 24px 0;
-                    line-height: 1.6;
-                    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
-                }
-                .prevent-idle-settings .github-link {
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background: linear-gradient(135deg, #5865F2 0%, #4752c4 100%);
-                    color: white;
-                    text-decoration: none;
-                    padding: 14px;
-                    border-radius: 8px;
-                    margin: 0 auto 16px auto;
-                    font-weight: 600;
-                    transition: all 0.2s ease;
-                    max-width: 80%;
-                    box-shadow: 0 4px 12px rgba(88, 101, 242, 0.5);
-                }
-                .prevent-idle-settings .github-link:hover {
-                    transform: translateY(-2px);
-                    box-shadow: 0 8px 16px rgba(88, 101, 242, 0.6);
-                }
-                .prevent-idle-settings .github-icon {
-                    width: 20px;
-                    height: 20px;
-                    margin-right: 8px;
-                }
-                .prevent-idle-settings .footer {
-                    font-size: 13px;
-                    color: #b9bbbe;
-                    text-align: center;
-                    margin-top: 8px;
-                    opacity: 0.8;
                 }
             </style>
-            <div class="prevent-idle-settings">
-                <h3>Prevent Idle Timer</h3>
-                
-                <div class="status-container">
-                    <div class="status-dot ${this.initialized ? 'active' : 'inactive'}"></div>
-                    <div class="status-text">${this.initialized ? 'Plugin Active' : 'Plugin Inactive'}</div>
+
+            <div class="nyx-idle-root">
+
+                <div class="nyx-header">
+                    <div class="nyx-logo">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                        </svg>
+                    </div>
+                    <div class="nyx-title-block">
+                        <div class="nyx-title">PreventIdleTimer</div>
+                        <div class="nyx-subtitle">by Nyxthal</div>
+                    </div>
+                    <div class="nyx-badge ${this.initialized ? 'active' : 'inactive'}">
+                        ${this.initialized ? 'ACTIVE' : 'INACTIVE'}
+                    </div>
                 </div>
-                
-                <div class="description">
-                    <p>This plugin prevents Discord from automatically disconnecting you from voice calls due to inactivity. Stay connected in voice chats indefinitely without being kicked for idling.</p>
-                    <p>A green indicator appears in the bottom-right corner of Discord when you're in a voice call to show the plugin is working.</p>
+
+                <div class="nyx-stats">
+                    <div class="nyx-stat">
+                        <div class="nyx-stat-value">${this.prevented}</div>
+                        <div class="nyx-stat-label">timers blocked</div>
+                    </div>
+                    <div class="nyx-stat">
+                        <div class="nyx-stat-value">${sessionTime}m</div>
+                        <div class="nyx-stat-label">session uptime</div>
+                    </div>
                 </div>
-                
-                <a href="https://github.com/DepravitiesFinest/NO-CALL-IDLE-KICK" class="github-link" target="_blank">
-                    <svg class="github-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
-                    </svg>
-                    View on GitHub
-                </a>
-                
-                <div class="footer">
-                    Version 1.1.0
+
+                <div class="nyx-card nyx-info">
+                    <div class="nyx-card-label">About</div>
+                    <p>Patches <span class="nyx-tag">window.setTimeout</span> globally to intercept and drop Discord's 3-minute voice inactivity timer before it can fire.</p>
+                    <p>A small indicator appears bottom-right when you're in a call confirming the plugin is running.</p>
                 </div>
+
+                <div class="nyx-footer">
+                    <span class="nyx-version">v1.3.0</span>
+                    <a href="https://github.com/DepravitiesFinest/NO-CALL-IDLE-KICK" class="nyx-gh-link" target="_blank">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>
+                        </svg>
+                        GitHub
+                    </a>
+                </div>
+
             </div>
         `;
-        
         return panel;
     }
 };
